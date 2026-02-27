@@ -14,6 +14,7 @@ import {
   select,
   checkbox,
   radioGroup,
+  embeddedPdfPage,
 } from '@pdfme/schemas';
 import { signature } from './signature';
 
@@ -35,6 +36,7 @@ export const getPlugins = () => {
     Select: select,
     Checkbox: checkbox,
     RadioGroup: radioGroup,
+    'PDF Page': embeddedPdfPage,
     // JAPANPOST: barcodes.japanpost,
     EAN13: barcodes.ean13,
     // EAN8: barcodes.ean8,
