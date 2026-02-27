@@ -180,6 +180,85 @@ export const readFile = (input: File | FileList | null): Promise<string | ArrayB
     }
   });
 
+export interface FileDropOptions {
+  element: HTMLElement;
+  accept?: string;
+  onFile: (dataUrl: string) => void;
+  onDragStateChange?: (isDragging: boolean) => void;
+}
+
+const matchesAccept = (file: File, accept?: string): boolean => {
+  if (!accept) return true;
+  const types = accept.split(',').map((t) => t.trim().toLowerCase());
+  const fileMime = file.type.toLowerCase();
+  return types.some((t) => {
+    if (t.endsWith('/*')) {
+      return fileMime.startsWith(t.slice(0, -1));
+    }
+    return fileMime === t;
+  });
+};
+
+export const createFileDropHandler = (options: FileDropOptions): (() => void) => {
+  const { element, accept, onFile, onDragStateChange } = options;
+  let dragCounter = 0;
+
+  const onDragEnter = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter++;
+    if (dragCounter === 1 && onDragStateChange) onDragStateChange(true);
+  };
+
+  const onDragOver = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const onDragLeave = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      if (onDragStateChange) onDragStateChange(false);
+    }
+  };
+
+  const onDrop = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter = 0;
+    if (onDragStateChange) onDragStateChange(false);
+
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    const file = files[0];
+    if (!matchesAccept(file, accept)) return;
+
+    readFile(file)
+      .then((result) => {
+        onFile(result as string);
+      })
+      .catch((error) => {
+        console.error('Error reading dropped file:', error);
+      });
+  };
+
+  element.addEventListener('dragenter', onDragEnter);
+  element.addEventListener('dragover', onDragOver);
+  element.addEventListener('dragleave', onDragLeave);
+  element.addEventListener('drop', onDrop);
+
+  return () => {
+    element.removeEventListener('dragenter', onDragEnter);
+    element.removeEventListener('dragover', onDragOver);
+    element.removeEventListener('dragleave', onDragLeave);
+    element.removeEventListener('drop', onDrop);
+  };
+};
+
 export const createErrorElm = () => {
   const container = document.createElement('div');
   const containerStyle: CSS.Properties = {
