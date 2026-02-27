@@ -11,6 +11,7 @@ import {
   isEditable,
   readFile,
   createSvgStr,
+  createFileDropHandler,
 } from '../utils.js';
 import { DEFAULT_OPACITY } from '../constants.js';
 import { getImageDimension } from './imagehelper.js';
@@ -149,6 +150,23 @@ const imageSchema: Plugin<ImageSchema> = {
       };
       Object.assign(label.style, labelStyle);
       container.appendChild(label);
+
+      const defaultBorder = label.style.border;
+      const defaultBg = label.style.backgroundColor;
+      createFileDropHandler({
+        element: label,
+        accept: 'image/jpeg,image/png',
+        onFile: (dataUrl) => {
+          if (onChange) onChange({ key: 'content', value: dataUrl });
+        },
+        onDragStateChange: (isDragging) => {
+          label.style.border = isDragging ? '2px dashed #1890ff' : defaultBorder;
+          label.style.backgroundColor = isDragging
+            ? 'rgba(24,144,255,0.1)'
+            : defaultBg;
+        },
+      });
+
       const input = document.createElement('input');
       const inputStyle: CSS.Properties = {
         ...fullSize,

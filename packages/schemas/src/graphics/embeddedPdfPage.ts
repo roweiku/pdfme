@@ -1,0 +1,313 @@
+import type { ChangeEvent } from 'react';
+import type { PDFEmbeddedPage } from '@pdfme/pdf-lib';
+import type { Plugin, Schema } from '@pdfme/common';
+import type * as CSS from 'csstype';
+import { mm2pt } from '@pdfme/common';
+import { FileText } from 'lucide';
+import {
+  convertForPdfLayoutProps,
+  addAlphaToHex,
+  isEditable,
+  readFile,
+  createSvgStr,
+  createFileDropHandler,
+} from '../utils.js';
+import { DEFAULT_OPACITY } from '../constants.js';
+
+interface EmbeddedPdfPageSchema extends Schema {
+  pageIndex: number;
+}
+
+const getCacheKey = (schema: EmbeddedPdfPageSchema, input: string) =>
+  `${schema.type}_${schema.pageIndex}_${input.slice(0, 64)}`;
+
+const getPreviewCacheKey = (value: string, pageIndex: number) =>
+  `embeddedPdfPage_preview_${pageIndex}_${value.slice(0, 64)}`;
+
+const fullSize = { width: '100%', height: '100%' };
+
+const stripDataUri = (value: string): string => {
+  const commaIdx = value.indexOf(',');
+  return commaIdx >= 0 ? value.slice(commaIdx + 1) : value;
+};
+
+const base64ToArrayBuffer = (value: string): ArrayBuffer => {
+  const base64 = stripDataUri(value);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+};
+
+// Render PDF page to a data URL using pdfjs-dist (dynamically imported)
+const renderPdfPagePreview = async (
+  pdfData: ArrayBuffer,
+  pageIndex: number,
+): Promise<string> => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pdfjsLib = await import('pdfjs-dist' as any) as any;
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const worker = await import('pdfjs-dist/build/pdf.worker.entry.js' as any) as any;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = worker.default ?? worker;
+  }
+  const pdfDoc = await pdfjsLib.getDocument({ data: pdfData, isEvalSupported: false }).promise;
+  const pageNum = Math.min(pageIndex + 1, pdfDoc.numPages);
+  const page = await pdfDoc.getPage(pageNum);
+  const scale = 2;
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d')!;
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas.toDataURL('image/png');
+};
+
+const embeddedPdfPageSchema: Plugin<EmbeddedPdfPageSchema> = {
+  pdf: async (arg) => {
+    const { value, schema, pdfDoc, page, _cache } = arg;
+    if (!value) return;
+
+    const pageIndex = schema.pageIndex ?? 0;
+    const cacheKey = getCacheKey(schema, value);
+    let embeddedPage = _cache.get(cacheKey) as PDFEmbeddedPage | undefined;
+
+    if (!embeddedPage) {
+      const base64 = stripDataUri(value);
+      const pdfBytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      const embeddedPages = await pdfDoc.embedPdf(pdfBytes, [pageIndex]);
+      embeddedPage = embeddedPages[0];
+      _cache.set(cacheKey, embeddedPage);
+    }
+
+    // Contain mode: fit embedded page into schema box while preserving aspect ratio
+    const _schema = { ...schema, position: { ...schema.position } };
+    const srcWidthMm = embeddedPage.width / (72 / 25.4);
+    const srcHeightMm = embeddedPage.height / (72 / 25.4);
+    const boxWidth = _schema.width;
+    const boxHeight = _schema.height;
+
+    const srcRatio = srcWidthMm / srcHeightMm;
+    const boxRatio = boxWidth / boxHeight;
+
+    if (srcRatio > boxRatio) {
+      _schema.width = boxWidth;
+      _schema.height = boxWidth / srcRatio;
+      _schema.position.y += (boxHeight - _schema.height) / 2;
+    } else {
+      _schema.width = boxHeight * srcRatio;
+      _schema.height = boxHeight;
+      _schema.position.x += (boxWidth - _schema.width) / 2;
+    }
+
+    const pageHeight = page.getHeight();
+    const lProps = convertForPdfLayoutProps({ schema: _schema, pageHeight });
+    const { width, height, rotate, position, opacity } = lProps;
+    const { x, y } = position;
+
+    page.drawPage(embeddedPage, { x, y, width, height, rotate, opacity });
+  },
+
+  ui: (arg) => {
+    const {
+      value,
+      rootElement,
+      mode,
+      onChange,
+      stopEditing,
+      tabIndex,
+      theme,
+      schema,
+      _cache,
+    } = arg;
+    const editable = isEditable(mode, schema);
+    const pageIndex = (schema as EmbeddedPdfPageSchema).pageIndex ?? 0;
+    const hasValue = !!value;
+
+    const container = document.createElement('div');
+    const containerStyle: CSS.Properties = {
+      ...fullSize,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      overflow: 'hidden',
+      position: 'relative',
+    };
+    Object.assign(container.style, containerStyle);
+    container.addEventListener('click', (e) => {
+      if (editable) {
+        e.stopPropagation();
+      }
+    });
+    rootElement.appendChild(container);
+
+    if (hasValue) {
+      const img = document.createElement('img');
+      const imgStyle: CSS.Properties = {
+        height: '100%',
+        width: '100%',
+        borderRadius: '0',
+        objectFit: 'contain',
+      };
+      Object.assign(img.style, imgStyle);
+
+      // Check cache for rendered preview
+      const previewCacheKey = getPreviewCacheKey(value, pageIndex);
+      const cachedPreview = _cache.get(previewCacheKey) as string | undefined;
+      if (cachedPreview) {
+        img.src = cachedPreview;
+      } else {
+        // Show loading state while rendering
+        img.alt = `PDF Page ${pageIndex + 1}`;
+        img.style.backgroundColor = '#f5f5f5';
+
+        const pdfData = base64ToArrayBuffer(value);
+        renderPdfPagePreview(pdfData, pageIndex)
+          .then((dataUrl) => {
+            _cache.set(previewCacheKey, dataUrl);
+            img.src = dataUrl;
+            img.style.backgroundColor = '';
+          })
+          .catch(() => {
+            // Fallback: show placeholder text on render failure
+            img.style.display = 'none';
+            const fallback = document.createElement('div');
+            Object.assign(fallback.style, {
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: '#f5f5f5',
+              fontSize: '11px',
+              color: '#666',
+            } as CSS.Properties);
+            fallback.textContent = `PDF Page ${pageIndex + 1}`;
+            container.appendChild(fallback);
+          });
+      }
+      container.appendChild(img);
+    }
+
+    // Remove button
+    if (hasValue && editable) {
+      const button = document.createElement('button');
+      button.textContent = 'x';
+      const buttonStyle: CSS.Properties = {
+        position: 'absolute',
+        top: '0',
+        left: '0',
+        zIndex: '1',
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        color: '#333',
+        background: '#f2f2f2',
+        borderRadius: '2px',
+        border: '1px solid #767676',
+        cursor: 'pointer',
+        height: '24px',
+        width: '24px',
+      };
+      Object.assign(button.style, buttonStyle);
+      button.addEventListener('click', () => {
+        if (onChange) onChange({ key: 'content', value: '' });
+      });
+      container.appendChild(button);
+    }
+
+    // File input for uploading PDF
+    if (!hasValue && editable) {
+      const label = document.createElement('label');
+      const labelStyle: CSS.Properties = {
+        ...fullSize,
+        display: 'flex',
+        position: 'absolute',
+        top: '0',
+        backgroundColor: addAlphaToHex(theme.colorPrimaryBg, 30),
+        cursor: 'pointer',
+      };
+      Object.assign(label.style, labelStyle);
+      container.appendChild(label);
+
+      const defaultBorder = label.style.border;
+      const defaultBg = label.style.backgroundColor;
+      createFileDropHandler({
+        element: label,
+        accept: 'application/pdf',
+        onFile: (dataUrl) => {
+          if (onChange) onChange({ key: 'content', value: dataUrl });
+        },
+        onDragStateChange: (isDragging) => {
+          label.style.border = isDragging ? '2px dashed #1890ff' : defaultBorder;
+          label.style.backgroundColor = isDragging
+            ? 'rgba(24,144,255,0.1)'
+            : defaultBg;
+        },
+      });
+
+      const input = document.createElement('input');
+      const inputStyle: CSS.Properties = {
+        ...fullSize,
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        width: '180px',
+        height: '30px',
+        marginLeft: '-90px',
+        marginTop: '-15px',
+      };
+      Object.assign(input.style, inputStyle);
+      input.tabIndex = tabIndex || 0;
+      input.type = 'file';
+      input.accept = 'application/pdf';
+      input.addEventListener('change', (event: Event) => {
+        const changeEvent = event as unknown as ChangeEvent<HTMLInputElement>;
+        readFile(changeEvent.target.files)
+          .then((result) => {
+            if (onChange) onChange({ key: 'content', value: result as string });
+          })
+          .catch((error) => {
+            console.error('Error reading file:', error);
+          });
+      });
+      input.addEventListener('blur', () => {
+        if (stopEditing) stopEditing();
+      });
+      label.appendChild(input);
+    }
+  },
+
+  propPanel: {
+    schema: {
+      pageIndex: {
+        title: 'Page Index',
+        type: 'number',
+        widget: 'inputNumber',
+        default: 0,
+        min: 0,
+        props: {
+          min: 0,
+          step: 1,
+        },
+      },
+    },
+    defaultSchema: {
+      name: '',
+      type: 'embeddedPdfPage',
+      content: '',
+      position: { x: 0, y: 0 },
+      width: 50,
+      height: 65,
+      rotate: 0,
+      opacity: DEFAULT_OPACITY,
+      pageIndex: 0,
+    },
+  },
+  icon: createSvgStr(FileText),
+};
+
+export default embeddedPdfPageSchema;

@@ -2,6 +2,7 @@ import multiVariableText from './multiVariableText/index.js';
 import text from './text/index.js';
 import image from './graphics/image.js';
 import svg from './graphics/svg.js';
+import embeddedPdfPage from './graphics/embeddedPdfPage.js';
 import barcodes from './barcodes/index.js';
 import line from './shapes/line.js';
 import table from './tables/index.js';
@@ -22,6 +23,7 @@ export {
   multiVariableText,
   image,
   svg,
+  embeddedPdfPage,
   table,
   barcodes,
   line,
