@@ -4,15 +4,19 @@ import type { Plugin, Schema } from '@pdfme/common';
 import type * as CSS from 'csstype';
 import { mm2pt } from '@pdfme/common';
 import { FileText } from 'lucide';
+import * as pdfjsLib from 'pdfjs-dist';
+// @ts-expect-error - PDFJSWorker import is not properly typed but required for functionality
+import PDFJSWorker from 'pdfjs-dist/build/pdf.worker.entry.js';
 import {
   convertForPdfLayoutProps,
   addAlphaToHex,
   isEditable,
   readFile,
   createSvgStr,
-  createFileDropHandler,
 } from '../utils.js';
 import { DEFAULT_OPACITY } from '../constants.js';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJSWorker as unknown as string;
 
 interface EmbeddedPdfPageSchema extends Schema {
   pageIndex: number;
@@ -21,9 +25,6 @@ interface EmbeddedPdfPageSchema extends Schema {
 const getCacheKey = (schema: EmbeddedPdfPageSchema, input: string) =>
   `${schema.type}_${schema.pageIndex}_${input.slice(0, 64)}`;
 
-const getPreviewCacheKey = (value: string, pageIndex: number) =>
-  `embeddedPdfPage_preview_${pageIndex}_${value.slice(0, 64)}`;
-
 const fullSize = { width: '100%', height: '100%' };
 
 const stripDataUri = (value: string): string => {
@@ -31,39 +32,33 @@ const stripDataUri = (value: string): string => {
   return commaIdx >= 0 ? value.slice(commaIdx + 1) : value;
 };
 
-const base64ToArrayBuffer = (value: string): ArrayBuffer => {
-  const base64 = stripDataUri(value);
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-};
+const getPreviewCacheKey = (schema: EmbeddedPdfPageSchema, input: string) =>
+  `${schema.type}_preview_${schema.pageIndex}_${input.slice(0, 64)}`;
 
-// Render PDF page to a data URL using pdfjs-dist (dynamically imported)
-const renderPdfPagePreview = async (
-  pdfData: ArrayBuffer,
+const renderPdfPageToDataUrl = async (
+  value: string,
   pageIndex: number,
+  cache: Map<string | number, unknown>,
+  cacheKey: string,
 ): Promise<string> => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pdfjsLib = await import('pdfjs-dist' as any) as any;
-  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const worker = await import('pdfjs-dist/build/pdf.worker.entry.js' as any) as any;
-    pdfjsLib.GlobalWorkerOptions.workerSrc = worker.default ?? worker;
-  }
-  const pdfDoc = await pdfjsLib.getDocument({ data: pdfData, isEvalSupported: false }).promise;
-  const pageNum = Math.min(pageIndex + 1, pdfDoc.numPages);
-  const page = await pdfDoc.getPage(pageNum);
-  const scale = 2;
-  const viewport = page.getViewport({ scale });
+  const cached = cache.get(cacheKey) as string | undefined;
+  if (cached) return cached;
+
+  const base64 = stripDataUri(value);
+  const pdfBytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const pdfDoc = await pdfjsLib.getDocument({ data: pdfBytes, isEvalSupported: false }).promise;
+  const page = await pdfDoc.getPage(Math.min(pageIndex + 1, pdfDoc.numPages));
+  const viewport = page.getViewport({ scale: 2 });
+
   const canvas = document.createElement('canvas');
   canvas.width = viewport.width;
   canvas.height = viewport.height;
-  const ctx = canvas.getContext('2d')!;
-  await page.render({ canvasContext: ctx, viewport }).promise;
-  return canvas.toDataURL('image/png');
+  const context = canvas.getContext('2d')!;
+  await page.render({ canvasContext: context, viewport }).promise;
+
+  const dataUrl = canvas.toDataURL('image/png');
+  cache.set(cacheKey, dataUrl);
+  return dataUrl;
 };
 
 const embeddedPdfPageSchema: Plugin<EmbeddedPdfPageSchema> = {
@@ -145,51 +140,55 @@ const embeddedPdfPageSchema: Plugin<EmbeddedPdfPageSchema> = {
     rootElement.appendChild(container);
 
     if (hasValue) {
-      const img = document.createElement('img');
-      const imgStyle: CSS.Properties = {
-        height: '100%',
-        width: '100%',
-        borderRadius: '0',
-        objectFit: 'contain',
-      };
-      Object.assign(img.style, imgStyle);
+      // Render actual PDF page preview
+      const previewCacheKey = getPreviewCacheKey(schema as EmbeddedPdfPageSchema, value);
+      const cachedDataUrl = _cache.get(previewCacheKey) as string | undefined;
 
-      // Check cache for rendered preview
-      const previewCacheKey = getPreviewCacheKey(value, pageIndex);
-      const cachedPreview = _cache.get(previewCacheKey) as string | undefined;
-      if (cachedPreview) {
-        img.src = cachedPreview;
+      if (cachedDataUrl) {
+        const img = document.createElement('img');
+        const imgStyle: CSS.Properties = {
+          height: '100%',
+          width: '100%',
+          borderRadius: '0',
+          objectFit: 'contain',
+        };
+        Object.assign(img.style, imgStyle);
+        img.src = cachedDataUrl;
+        container.appendChild(img);
       } else {
-        // Show loading state while rendering
-        img.alt = `PDF Page ${pageIndex + 1}`;
-        img.style.backgroundColor = '#f5f5f5';
+        // Show loading placeholder while rendering
+        const loading = document.createElement('div');
+        const loadingStyle: CSS.Properties = {
+          ...fullSize,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: '#f5f5f5',
+          fontSize: '11px',
+          color: '#999',
+        };
+        Object.assign(loading.style, loadingStyle);
+        loading.textContent = `Loading PDF Page ${pageIndex + 1}...`;
+        container.appendChild(loading);
 
-        const pdfData = base64ToArrayBuffer(value);
-        renderPdfPagePreview(pdfData, pageIndex)
+        renderPdfPageToDataUrl(value, pageIndex, _cache, previewCacheKey)
           .then((dataUrl) => {
-            _cache.set(previewCacheKey, dataUrl);
-            img.src = dataUrl;
-            img.style.backgroundColor = '';
-          })
-          .catch(() => {
-            // Fallback: show placeholder text on render failure
-            img.style.display = 'none';
-            const fallback = document.createElement('div');
-            Object.assign(fallback.style, {
-              width: '100%',
+            const img = document.createElement('img');
+            const imgStyle: CSS.Properties = {
               height: '100%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: '#f5f5f5',
-              fontSize: '11px',
-              color: '#666',
-            } as CSS.Properties);
-            fallback.textContent = `PDF Page ${pageIndex + 1}`;
-            container.appendChild(fallback);
+              width: '100%',
+              borderRadius: '0',
+              objectFit: 'contain',
+            };
+            Object.assign(img.style, imgStyle);
+            img.src = dataUrl;
+            container.replaceChild(img, loading);
+          })
+          .catch((err) => {
+            console.error('Failed to render PDF page preview:', err);
+            loading.textContent = `PDF Page ${pageIndex + 1}`;
           });
       }
-      container.appendChild(img);
     }
 
     // Remove button
@@ -232,22 +231,6 @@ const embeddedPdfPageSchema: Plugin<EmbeddedPdfPageSchema> = {
       };
       Object.assign(label.style, labelStyle);
       container.appendChild(label);
-
-      const defaultBorder = label.style.border;
-      const defaultBg = label.style.backgroundColor;
-      createFileDropHandler({
-        element: label,
-        accept: 'application/pdf',
-        onFile: (dataUrl) => {
-          if (onChange) onChange({ key: 'content', value: dataUrl });
-        },
-        onDragStateChange: (isDragging) => {
-          label.style.border = isDragging ? '2px dashed #1890ff' : defaultBorder;
-          label.style.backgroundColor = isDragging
-            ? 'rgba(24,144,255,0.1)'
-            : defaultBg;
-        },
-      });
 
       const input = document.createElement('input');
       const inputStyle: CSS.Properties = {
