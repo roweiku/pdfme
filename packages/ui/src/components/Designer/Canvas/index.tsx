@@ -24,7 +24,7 @@ import { PluginsRegistry } from '../../../contexts.js';
 import { X } from 'lucide-react';
 import { RULER_HEIGHT, RIGHT_SIDEBAR_WIDTH, DESIGNER_CLASSNAME } from '../../../constants.js';
 import { usePrevious } from '../../../hooks.js';
-import { round, flatten, uuid } from '../../../helper.js';
+import { round, flatten, uuid, getRotatedBoundsConstraints, getRotatedBBox } from '../../../helper.js';
 import Paper from '../../Paper.js';
 import Renderer from '../../Renderer.js';
 import Selecto from './Selecto.js';
@@ -175,30 +175,28 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
     const actualTop = top / ZOOM;
     const actualLeft = left / ZOOM;
     const { width: pageWidth, height: pageHeight } = pageSizes[pageCursor];
-    let topPadding = 0;
-    let rightPadding = 0;
-    let bottomPadding = 0;
-    let leftPadding = 0;
+    let padding: [number, number, number, number] = [0, 0, 0, 0];
 
     if (isBlankPdf(basePdf)) {
-      const [t, r, b, l] = basePdf.padding;
-      topPadding = t * ZOOM;
-      rightPadding = r;
-      bottomPadding = b;
-      leftPadding = l * ZOOM;
+      padding = basePdf.padding as [number, number, number, number];
     }
 
-    if (actualTop + targetHeight > pageHeight - bottomPadding) {
-      target.style.top = `${(pageHeight - targetHeight - bottomPadding) * ZOOM}px`;
-    } else {
-      target.style.top = `${top < topPadding ? topPadding : top}px`;
-    }
+    const rotate = parseFloat(
+      target.style.transform?.replace('rotate(', '').replace('deg)', '') || '0',
+    );
+    const { minX, maxX, minY, maxY } = getRotatedBoundsConstraints(
+      targetWidth,
+      targetHeight,
+      rotate,
+      pageWidth,
+      pageHeight,
+      padding,
+    );
 
-    if (actualLeft + targetWidth > pageWidth - rightPadding) {
-      target.style.left = `${(pageWidth - targetWidth - rightPadding) * ZOOM}px`;
-    } else {
-      target.style.left = `${left < leftPadding ? leftPadding : left}px`;
-    }
+    const clampedTop = Math.min(Math.max(actualTop, minY), maxY);
+    const clampedLeft = Math.min(Math.max(actualLeft, minX), maxX);
+    target.style.top = `${clampedTop * ZOOM}px`;
+    target.style.left = `${clampedLeft * ZOOM}px`;
   };
 
   const onDragEnd = ({ target }: { target: HTMLElement | SVGElement }) => {
@@ -269,21 +267,31 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
 
   const onResize = ({ target, width, height, direction }: OnResize) => {
     if (!target) return;
-    let topPadding = 0;
-    let rightPadding = 0;
-    let bottomPadding = 0;
-    let leftPadding = 0;
+    let padding: [number, number, number, number] = [0, 0, 0, 0];
 
     if (isBlankPdf(basePdf)) {
-      const [t, r, b, l] = basePdf.padding;
-      topPadding = t * ZOOM;
-      rightPadding = mm2px(r);
-      bottomPadding = mm2px(b);
-      leftPadding = l * ZOOM;
+      padding = basePdf.padding as [number, number, number, number];
     }
+    const [, pr, pb] = padding;
 
     const pageWidth = mm2px(pageSizes[pageCursor].width);
     const pageHeight = mm2px(pageSizes[pageCursor].height);
+
+    const rotate = parseFloat(
+      target.style.transform?.replace('rotate(', '').replace('deg)', '') || '0',
+    );
+    const newWidthMm = width / ZOOM;
+    const newHeightMm = height / ZOOM;
+    const { minX, minY } = getRotatedBoundsConstraints(
+      newWidthMm,
+      newHeightMm,
+      rotate,
+      pageSizes[pageCursor].width,
+      pageSizes[pageCursor].height,
+      padding,
+    );
+    const minLeftPx = minX * ZOOM;
+    const minTopPx = minY * ZOOM;
 
     const obj: { top?: string; left?: string; width: string; height: string } = {
       width: `${width}px`,
@@ -293,17 +301,17 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
     const s = target.style;
     let newLeft = fmt4Num(s.left) + (fmt4Num(s.width) - width);
     let newTop = fmt4Num(s.top) + (fmt4Num(s.height) - height);
-    if (newLeft < leftPadding) {
-      newLeft = leftPadding;
+    if (newLeft < minLeftPx) {
+      newLeft = minLeftPx;
     }
-    if (newTop < topPadding) {
-      newTop = topPadding;
+    if (newTop < minTopPx) {
+      newTop = minTopPx;
     }
-    if (newLeft + width > pageWidth - rightPadding) {
-      obj.width = `${pageWidth - rightPadding - newLeft}px`;
+    if (newLeft + width > pageWidth - mm2px(pr)) {
+      obj.width = `${pageWidth - mm2px(pr) - newLeft}px`;
     }
-    if (newTop + height > pageHeight - bottomPadding) {
-      obj.height = `${pageHeight - bottomPadding - newTop}px`;
+    if (newTop + height > pageHeight - mm2px(pb)) {
+      obj.height = `${pageHeight - mm2px(pb) - newTop}px`;
     }
 
     const d = direction.toString();
@@ -454,7 +462,12 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
                 <Moveable
                   ref={moveable}
                   target={activeElements}
-                  bounds={{ left: 0, top: 0, bottom: paperSize.height, right: paperSize.width }}
+                  bounds={{
+                    left: -paperSize.width,
+                    top: -paperSize.height,
+                    bottom: paperSize.height * 2,
+                    right: paperSize.width * 2,
+                  }}
                   horizontalGuidelines={getGuideLines(horizontalGuides.current, index)}
                   verticalGuidelines={getGuideLines(verticalGuides.current, index)}
                   keepRatio={isPressShiftKey}

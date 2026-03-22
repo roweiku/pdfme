@@ -88,6 +88,48 @@ export const round = (number: number, precision: number) => {
 
 export const flatten = <T>(arr: T[][]): T[] => ([] as T[]).concat(...arr);
 
+/**
+ * Calculate the axis-aligned bounding box (AABB) of a rotated rectangle.
+ * When a rectangle is rotated, its AABB differs from the original dimensions.
+ */
+export const getRotatedBBox = (
+  width: number,
+  height: number,
+  rotate: number,
+): { width: number; height: number } => {
+  const rad = (rotate * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  return {
+    width: width * cos + height * sin,
+    height: width * sin + height * cos,
+  };
+};
+
+/**
+ * Calculate position constraints for a rotated element to keep its AABB within page bounds.
+ * Returns min/max values for position.x and position.y.
+ */
+export const getRotatedBoundsConstraints = (
+  width: number,
+  height: number,
+  rotate: number,
+  pageWidth: number,
+  pageHeight: number,
+  padding: [number, number, number, number] = [0, 0, 0, 0],
+): { minX: number; maxX: number; minY: number; maxY: number } => {
+  const aabb = getRotatedBBox(width, height, rotate);
+  const [pt, pr, pb, pl] = padding;
+  const offsetX = (aabb.width - width) / 2;
+  const offsetY = (aabb.height - height) / 2;
+  return {
+    minX: pl + offsetX,
+    maxX: pageWidth - pr - width - offsetX,
+    minY: pt + offsetY,
+    maxY: pageHeight - pb - height - offsetY,
+  };
+};
+
 const up = 'up';
 const shiftUp = 'shift+up';
 const down = 'down';
@@ -305,14 +347,20 @@ export const template2SchemasList = async (_template: Template) => {
       : schemasForUI.slice(0, pageSizes.length)
   ).map((schema, i) => {
     Object.values(schema).forEach((value) => {
-      const { width, height } = pageSizes[i];
-      const xEdge = value.position.x + value.width;
-      const yEdge = value.position.y + value.height;
-      if (xEdge > width) {
-        value.position.x = Math.max(0, width - value.width);
+      const { width: pageW, height: pageH } = pageSizes[i];
+      const rotate = ((value as Record<string, unknown>).rotate as number | undefined) ?? 0;
+      const aabb = getRotatedBBox(value.width, value.height, rotate);
+      const offsetX = (aabb.width - value.width) / 2;
+      const offsetY = (aabb.height - value.height) / 2;
+      const maxX = pageW - value.width - offsetX;
+      const maxY = pageH - value.height - offsetY;
+      const minX = offsetX;
+      const minY = offsetY;
+      if (value.position.x > maxX) {
+        value.position.x = Math.max(minX, maxX);
       }
-      if (yEdge > height) {
-        value.position.y = Math.max(0, height - value.height);
+      if (value.position.y > maxY) {
+        value.position.y = Math.max(minY, maxY);
       }
     });
 
@@ -398,19 +446,27 @@ export const moveCommandToChangeSchemasArg = (props: {
         break;
     }
 
-    return value > 0 ? value : 0;
+    return value;
   };
 
   return activeSchemas.map((as) => {
     let value = getValue(as);
     const { width, height } = as;
+    const rotate = (as as Record<string, unknown>).rotate as number | undefined;
+    const { minX, maxX, minY, maxY } = getRotatedBoundsConstraints(
+      width,
+      height,
+      rotate ?? 0,
+      pageSize.width,
+      pageSize.height,
+    );
     if (key === 'x') {
-      value = value > pageSize.width - width ? round(pageSize.width - width, 2) : value;
+      value = Math.min(Math.max(value, minX), maxX);
     } else {
-      value = value > pageSize.height - height ? round(pageSize.height - height, 2) : value;
+      value = Math.min(Math.max(value, minY), maxY);
     }
 
-    return { key: `position.${key}`, value, schemaId: as.id };
+    return { key: `position.${key}`, value: round(value, 2), schemaId: as.id };
   });
 };
 
@@ -428,17 +484,27 @@ const handlePositionSizeChange = (
   pageSize: Size,
 ) => {
   const padding = isBlankPdf(basePdf) ? basePdf.padding : [0, 0, 0, 0];
-  const [pt, pr, pb, pl] = padding;
   const { width: pw, height: ph } = pageSize;
   const calcBounds = (v: unknown, min: number, max: number) =>
     Math.min(Math.max(Number(v), min), max);
+  const rotate = ((schema as Record<string, unknown>).rotate as number | undefined) ?? 0;
+  const { minX, maxX, minY, maxY } = getRotatedBoundsConstraints(
+    schema.width,
+    schema.height,
+    rotate,
+    pw,
+    ph,
+    padding as [number, number, number, number],
+  );
   if (key === 'position.x') {
-    schema.position.x = calcBounds(value, pl, pw - schema.width - pr);
+    schema.position.x = calcBounds(value, minX, maxX);
   } else if (key === 'position.y') {
-    schema.position.y = calcBounds(value, pt, ph - schema.height - pb);
+    schema.position.y = calcBounds(value, minY, maxY);
   } else if (key === 'width') {
+    const [, pr] = padding;
     schema.width = calcBounds(value, 0, pw - schema.position.x - pr);
   } else if (key === 'height') {
+    const [, , pb] = padding;
     schema.height = calcBounds(value, 0, ph - schema.position.y - pb);
   }
 };
