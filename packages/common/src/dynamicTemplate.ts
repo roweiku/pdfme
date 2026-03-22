@@ -25,11 +25,25 @@ interface LayoutItem {
   baseY: number;
   height: number;
   dynamicHeights: number[];
+  /** For rotated elements: offset applied to baseY for AABB layout */
+  rotationYOffset?: number;
+  /** For rotated elements: original schema height before AABB adjustment */
+  originalHeight?: number;
 }
 
 /** Calculate the content height of a page (drawable area excluding padding) */
 const getContentHeight = (basePdf: BlankPdf): number =>
   basePdf.height - basePdf.padding[0] - basePdf.padding[2];
+
+/**
+ * Calculate the AABB height of a rotated rectangle.
+ * For a rectangle (w, h) rotated by θ degrees, the AABB height is:
+ *   |w·sin(θ)| + |h·cos(θ)|
+ */
+const getRotatedLayoutHeight = (width: number, height: number, rotate: number): number => {
+  const rad = (rotate * Math.PI) / 180;
+  return width * Math.abs(Math.sin(rad)) + height * Math.abs(Math.cos(rad));
+};
 
 /** Get the input value for a schema */
 const getSchemaValue = (schema: Schema, input: Record<string, string>): string =>
@@ -194,6 +208,60 @@ function removeTrailingEmptyPages(pages: Schema[][]): void {
 }
 
 /**
+ * Adjust layout items for rotated elements.
+ * Uses AABB height for page-break decisions while preserving original schema values.
+ * Only adjusts non-dynamic elements (where height didn't change from getDynamicHeights).
+ */
+function adjustItemsForRotation(items: LayoutItem[]): void {
+  for (const item of items) {
+    const rotate = item.schema.rotate ?? 0;
+    if (Math.abs(rotate % 360) < EPSILON) continue;
+
+    // Only adjust non-dynamic elements (tables have multiple heights or changed heights)
+    if (
+      item.dynamicHeights.length !== 1 ||
+      Math.abs(item.dynamicHeights[0] - item.schema.height) > EPSILON
+    )
+      continue;
+
+    const aabbH = getRotatedLayoutHeight(item.schema.width, item.schema.height, rotate);
+    const yOffset = (item.schema.height - aabbH) / 2;
+
+    item.rotationYOffset = yOffset;
+    item.originalHeight = item.schema.height;
+    item.baseY += yOffset;
+    item.height = aabbH;
+    item.dynamicHeights = [aabbH];
+  }
+}
+
+/**
+ * Restore original schema dimensions after layout for rotated elements.
+ */
+function restoreRotationAdjustments(pages: Schema[][], items: LayoutItem[]): void {
+  const adjustmentMap = new Map<string, { yOffset: number; originalHeight: number }>();
+  for (const item of items) {
+    if (item.rotationYOffset !== undefined && item.originalHeight !== undefined) {
+      adjustmentMap.set(item.schema.name, {
+        yOffset: item.rotationYOffset,
+        originalHeight: item.originalHeight,
+      });
+    }
+  }
+  if (adjustmentMap.size === 0) return;
+
+  for (const page of pages) {
+    for (const schema of page) {
+      const adj = adjustmentMap.get(schema.name);
+      if (adj) {
+        schema.position.y -= adj.yOffset;
+        schema.height = adj.originalHeight;
+      }
+    }
+  }
+}
+
+/**
  * Process a single template page that has dynamic content.
  * Uses the same layout algorithm as the original implementation,
  * but scoped to a single page's schemas.
@@ -284,8 +352,15 @@ export const getDynamicTemplate = async (
       }
     }
 
+    // Adjust layout metrics for rotated elements (use AABB height for page breaks)
+    adjustItemsForRotation(items);
+
     // Process all pages independently (no cross-page offset propagation)
     const processedPages = processDynamicPage(items, orderMap, contentHeight, paddingTop);
+
+    // Restore original schema dimensions for rotated elements
+    restoreRotationAdjustments(processedPages, items);
+
     resultPages.push(...processedPages);
   }
 
