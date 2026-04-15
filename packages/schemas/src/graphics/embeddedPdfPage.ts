@@ -19,10 +19,10 @@ interface EmbeddedPdfPageSchema extends Schema {
 }
 
 const getCacheKey = (schema: EmbeddedPdfPageSchema, input: string) =>
-  `${schema.type}_${schema.pageIndex}_${input.slice(0, 64)}`;
+  `${schema.type}_${schema.pageIndex}_${input.length}_${input.slice(0, 64)}_${input.slice(-64)}`;
 
 const getPreviewCacheKey = (value: string, pageIndex: number) =>
-  `embeddedPdfPage_preview_${pageIndex}_${value.slice(0, 64)}`;
+  `embeddedPdfPage_preview_${pageIndex}_${value.length}_${value.slice(0, 64)}_${value.slice(-64)}`;
 
 const fullSize = { width: '100%', height: '100%' };
 
